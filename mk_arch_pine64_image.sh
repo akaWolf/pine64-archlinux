@@ -2,6 +2,29 @@
 
 image="./image"
 dest="./mnt"
+device=""
+
+trap error_handler 1 2 3 6 ERR
+
+cleanup()
+{
+	echo "release resources"
+
+	[[ -d "${dest}/proc" ]] && umount --quiet "${dest}/proc" || true
+	[[ -d "${dest}/dev" ]] && umount --quiet --recursive "${dest}/dev" || true
+	[[ -d "${dest}/sys" ]] && umount --quiet --recursive "${dest}/sys" || true
+	[[ -d "${dest}/run" ]] && umount --quiet --recursive "${dest}/run" || true
+
+	[[ -d "$dest" ]] && umount --quiet $dest || true
+
+	[[ ! -z "$device" ]] && losetup -d $device
+}
+
+error_handler()
+{
+	cleanup
+	exit 1
+}
 
 cd /tmp
 
@@ -37,40 +60,47 @@ mount $partition $dest
 
 echo "downloading rootfs"
 
-rm -rf ArchLinuxARM-aarch64-latest.tar.gz
+rm -f ArchLinuxARM-aarch64-latest.tar.gz
 
-curl --silent --remote-name --location http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
+curl --progress-bar --remote-name --location https://archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
 
 echo "unpacking rootfs"
 
 bsdtar -xpf ArchLinuxARM-aarch64-latest.tar.gz -C $dest
 
-echo "downloading and copying boot script"
+echo "chrooting and configuring"
 
-curl --silent --output "${dest}/boot/boot.scr" http://os.archlinuxarm.org/os/allwinner/boot/pine64/boot.scr
+cp /usr/bin/qemu-aarch64-static "${dest}/usr/bin"
 
-echo "release resources"
+mount -t proc /proc "${dest}/proc"
+mount --rbind /dev "${dest}/dev"
+mount --make-rslave "${dest}/dev"
+#mount -o bind /dev/pts "${dest}/dev/pts"
+mount --rbind /sys "${dest}/sys"
+mount --make-rslave "${dest}/sys"
+mount --rbind /run "${dest}/run"
+mount --make-rslave "${dest}/run"
 
-umount $dest
+[[ ! -f /proc/sys/fs/binfmt_misc/aarch64 ]] && echo ':aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7:\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff:/usr/bin/qemu-aarch64-static:' > /proc/sys/fs/binfmt_misc/register
 
-losetup -d $device
+chroot_commands="
+pacman-key --init &&
+pacman-key --populate archlinuxarm &&
+killall -KILL gpg-agent &&
+pacman -Sy --noconfirm uboot-pine64
+"
 
-echo "downloading bootloader"
+chroot $dest /bin/bash -c "$chroot_commands" < /dev/null
 
-rm -rf u-boot-sunxi-with-spl.bin
-
-curl --silent --remote-name --location http://os.archlinuxarm.org/os/allwinner/boot/pine64/u-boot-sunxi-with-spl.bin
+rm "${dest}/usr/bin/qemu-aarch64-static"
 
 echo "writing bootloader"
 
-dd if=u-boot-sunxi-with-spl.bin of=$image bs=8k seek=1 conv=notrunc status=noxfer
+dd if="${dest}/boot/u-boot-sunxi-with-spl.bin" of=$image bs=8k seek=1 conv=notrunc status=noxfer
+
+cleanup
 
 echo "done!"
-echo $(ls -l $image)
+echo $(du -h $(realpath $image))
 
-echo "you need to do after boot:"
-echo "pacman-key --init"
-echo "pacman-key --populate archlinuxarm"
-echo "rm /boot/boot.scr"
-echo "pacman -Sy uboot-pine64"
 echo "credits: https://archlinuxarm.org/platforms/armv8/allwinner/pine64"
